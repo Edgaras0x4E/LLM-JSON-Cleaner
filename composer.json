@@ -1,0 +1,20 @@
+{
+    "name": "edgaras/llm-json-cleaner",
+    "description": "A PHP library that ensures strict JSON extraction and schema validation from LLM API responses, preventing malformed or unexpected output.",
+    "type": "library",
+    "homepage": "https://github.com/Edgaras0x4E/LLM-JSON-Cleaner",
+    "license": "MIT",
+    "keywords": ["llm","json","cleaner","schema","gpt","validation", "validator"],
+    "autoload": {
+        "psr-4": {
+            "Edgaras\\LLMJsonCleaner\\": "src/"
+        }
+    }, 
+    "minimum-stability": "stable",
+    "require": {
+        "php": ">=8.3.0" 
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    }
+}
