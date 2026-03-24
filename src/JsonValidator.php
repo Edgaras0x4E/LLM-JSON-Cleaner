@@ -11,29 +11,16 @@ class JsonValidator
         }
 
         $errors = [];
- 
-        $allowedTopLevelKeys = [];
-        foreach ($schema as $schemaKey => $_) {
-            $parts = explode('.', $schemaKey);
-            $allowedTopLevelKeys[] = $parts[0];
-        }
-        $allowedTopLevelKeys = array_unique($allowedTopLevelKeys);
- 
+        $allowedTree = self::buildAllowedKeysTree($schema);
+
         foreach ($data as $index => $item) {
             $itemErrors = [];
- 
+
             foreach ($schema as $key => $rules) {
                 self::singlePassCheck($item, $key, $rules, $itemErrors);
             }
- 
-            foreach ($item as $fieldKey => $_) {
-                if (!in_array($fieldKey, $allowedTopLevelKeys, true)) {
-                    if (!isset($itemErrors[$fieldKey])) {
-                        $itemErrors[$fieldKey] = [];
-                    }
-                    $itemErrors[$fieldKey][] = "Unexpected field: $fieldKey";
-                }
-            }
+
+            self::checkUnexpectedFields($item, $allowedTree, $itemErrors);
 
             if (!empty($itemErrors)) {
                 $errors[$index] = $itemErrors;
@@ -42,26 +29,34 @@ class JsonValidator
 
         return empty($errors) ? true : $errors;
     }
- 
+
     private static function singlePassCheck(array $item, string $key, array $rules, array &$itemErrors): void
-    { 
+    {
         if (str_contains($key, '.*.')) {
             [$baseKey, $rest] = explode('.*.', $key, 2);
- 
+
             if (!array_key_exists($baseKey, $item) || !is_array($item[$baseKey])) {
-                self::initErrorArray($itemErrors, $baseKey);
-                $itemErrors[$baseKey][] = "Missing or invalid array field: $baseKey";
+                if (in_array('required', $rules, true) || array_key_exists($baseKey, $item)) {
+                    self::initErrorArray($itemErrors, $baseKey);
+                    $itemErrors[$baseKey][] = "Missing or invalid array field: $baseKey";
+                }
                 return;
             }
- 
+
+            if (!self::isList($item[$baseKey]) && !empty($item[$baseKey])) {
+                self::initErrorArray($itemErrors, $baseKey);
+                $itemErrors[$baseKey][] = "Expected a sequential array for: $baseKey";
+                return;
+            }
+
             foreach ($item[$baseKey] as $i => $subItem) {
                 $iKey = (string)$i;
                 self::initErrorArray($itemErrors, $baseKey);
- 
+
                 if (!isset($itemErrors[$baseKey][$iKey]) || !is_array($itemErrors[$baseKey][$iKey])) {
                     $itemErrors[$baseKey][$iKey] = [];
                 }
- 
+
                 if (str_contains($rest, '.*.')) {
                     if (!is_array($subItem)) {
                         $itemErrors[$baseKey][$iKey][] =
@@ -81,12 +76,12 @@ class JsonValidator
                         }
                     }
                 }
- 
+
                 if (empty($itemErrors[$baseKey][$iKey])) {
                     unset($itemErrors[$baseKey][$iKey]);
                 }
             }
- 
+
             if (isset($itemErrors[$baseKey]) && empty($itemErrors[$baseKey])) {
                 unset($itemErrors[$baseKey]);
             }
@@ -94,14 +89,19 @@ class JsonValidator
             self::directKeyCheck($item, $key, $rules, $itemErrors);
         }
     }
- 
+
     private static function directKeyCheck(array $item, string $key, array $rules, array &$itemErrors): void
     {
         if (str_ends_with($key, '.*')) {
             $actualKey = substr($key, 0, -2);
             self::initErrorArray($itemErrors, $actualKey);
             if (!array_key_exists($actualKey, $item) || !is_array($item[$actualKey])) {
-                $itemErrors[$actualKey][] = "Missing or invalid array field: $actualKey";
+                if (in_array('required', $rules, true) || array_key_exists($actualKey, $item)) {
+                    $itemErrors[$actualKey][] = "Missing or invalid array field: $actualKey";
+                }
+                if (empty($itemErrors[$actualKey])) {
+                    unset($itemErrors[$actualKey]);
+                }
                 return;
             }
             foreach ($item[$actualKey] as $i => $value) {
@@ -117,28 +117,37 @@ class JsonValidator
             }
             return;
         }
- 
+
         self::initErrorArray($itemErrors, $key);
- 
+
         if (!array_key_exists($key, $item)) {
-            $itemErrors[$key][] = "Missing required field: $key";
+            if (in_array('required', $rules, true)) {
+                $itemErrors[$key][] = "Missing required field: $key";
+            }
         } else {
             $value = $item[$key];
-            foreach ($rules as $rule) {
-                $result = self::applyRule($value, $rule);
-                if ($result !== true) {
-                    $itemErrors[$key][] = $result;
+            if ($value === null && in_array('nullable', $rules, true)) {
+               
+            } else {
+                foreach ($rules as $rule) {
+                    $result = self::applyRule($value, $rule);
+                    if ($result !== true) {
+                        $itemErrors[$key][] = $result;
+                    }
                 }
             }
         }
- 
+
         if (empty($itemErrors[$key])) {
             unset($itemErrors[$key]);
         }
     }
- 
+
     private static function validateValue(mixed $value, array $rules, array &$errors): void
     {
+        if ($value === null && in_array('nullable', $rules, true)) {
+            return;
+        }
         foreach ($rules as $rule) {
             $result = self::applyRule($value, $rule);
             if ($result !== true) {
@@ -146,7 +155,7 @@ class JsonValidator
             }
         }
     }
- 
+
     private static function applyRule(mixed $value, string $rule): bool|string
     {
         if (str_contains($rule, ':')) {
@@ -157,21 +166,37 @@ class JsonValidator
         }
 
         return match ($ruleName) {
-            'required' => (empty($value) && $value !== 0 && $value !== '0')
+            'required' => (empty($value) && $value !== 0 && $value !== '0' && $value !== false)
                 ? "Field is required."
                 : true,
+            'nullable' => true,
             'string' => is_string($value)
                 ? true
                 : "Must be a string.",
             'integer' => is_int($value)
                 ? true
                 : 'Must be an integer.',
+            'float' => (is_float($value) || is_int($value))
+                ? true
+                : 'Must be a float.',
+            'numeric' => is_numeric($value)
+                ? true
+                : 'Must be numeric.',
             'boolean' => is_bool($value)
                 ? true
                 : "Must be a boolean.",
             'array' => is_array($value)
                 ? true
                 : "Must be an array.",
+            'email' => (is_string($value) && filter_var($value, FILTER_VALIDATE_EMAIL) !== false)
+                ? true
+                : "Must be a valid email address.",
+            'url' => (is_string($value) && filter_var($value, FILTER_VALIDATE_URL) !== false)
+                ? true
+                : "Must be a valid URL.",
+            'date' => (is_string($value) && strtotime($value) !== false)
+                ? true
+                : "Must be a valid date.",
             'min' => is_array($value)
                 ? (count($value) >= (int)$param ? true : "Must have at least $param items.")
                 : (is_numeric($value) && (int)$value >= (int)$param
@@ -188,12 +213,66 @@ class JsonValidator
             default => "Invalid validation rule: $rule",
         };
     }
- 
+
+    private static function buildAllowedKeysTree(array $schema): array
+    {
+        $tree = [];
+        foreach ($schema as $key => $_) {
+            $parts = explode('.', $key);
+            $current = &$tree;
+            foreach ($parts as $part) {
+                if ($part === '*') {
+                    if (!isset($current['*'])) {
+                        $current['*'] = [];
+                    }
+                    $current = &$current['*'];
+                } else {
+                    if (!isset($current[$part])) {
+                        $current[$part] = [];
+                    }
+                    $current = &$current[$part];
+                }
+            }
+            unset($current);
+        }
+        return $tree;
+    }
+
+    private static function checkUnexpectedFields(array $data, array $allowedTree, array &$errors): void
+    {
+        foreach ($data as $key => $value) {
+            if (!array_key_exists($key, $allowedTree)) {
+                self::initErrorArray($errors, $key);
+                $errors[$key][] = "Unexpected field: $key";
+                continue;
+            }
+
+            if (is_array($value) && isset($allowedTree[$key]['*'])) {
+                foreach ($value as $i => $subItem) {
+                    if (is_array($subItem)) {
+                        $iKey = (string)$i;
+                        self::initErrorArray($errors, $key);
+                        if (!isset($errors[$key][$iKey]) || !is_array($errors[$key][$iKey])) {
+                            $errors[$key][$iKey] = [];
+                        }
+                        self::checkUnexpectedFields($subItem, $allowedTree[$key]['*'], $errors[$key][$iKey]);
+                        if (empty($errors[$key][$iKey])) {
+                            unset($errors[$key][$iKey]);
+                        }
+                    }
+                }
+                if (isset($errors[$key]) && empty($errors[$key])) {
+                    unset($errors[$key]);
+                }
+            }
+        }
+    }
+
     private static function isList(array $arr): bool
     {
         return array_keys($arr) === range(0, count($arr) - 1);
     }
- 
+
     private static function initErrorArray(array &$arr, string $key): void
     {
         if (!isset($arr[$key]) || !is_array($arr[$key])) {
